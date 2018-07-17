@@ -1,0 +1,3 @@
+runcmd:
+ - puppet apply /etc/puppet/main.pp --parser=future
+ - /usr/local/bin/logdna-send.py --app=cloud-config /var/log/cloud-init-output.log

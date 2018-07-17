@@ -1,0 +1,88 @@
+#cloud-config
+repo_update: true
+repo_upgrade: all
+
+packages:
+ - aws-cli
+ - puppet3
+ - facter2
+ - git
+ - python # for envkey parsing
+
+write_files:
+ - encoding: gz+b64
+   content: ${logdna_send_py_gz_b64}
+   owner: root:root
+   path: /usr/local/bin/logdna-send.py
+   permissions: '0755'
+
+runcmd:
+ # for security patches - force kernel upgrade
+ - yum install -y kernel
+
+ # provide Terraform defaults for environment variables, overridable in envkey
+ - export PUPPET_REPO='${puppet_repo}'; echo 'PUPPET_REPO=${puppet_repo}' >> /etc/environment
+ - export PUPPET_BRANCH='${puppet_branch}'; echo 'PUPPET_BRANCH=${puppet_branch}' >> /etc/environment
+ - export SITENAME='${sitename}'; echo 'SITENAME=${sitename}' >> /etc/environment
+ - export SITEDOMAIN='${sitedomain}'; echo 'SITEDOMAIN=${sitedomain}' >> /etc/environment
+ - export TERRAFORM_CRON_MAIL_SNS_TOPIC='${terraform_cron_mail_sns_topic}'; echo 'TERRAFORM_CRON_MAIL_SNS_TOPIC=${terraform_cron_mail_sns_topic}' >> /etc/environment
+
+ # install envkey-source and envkey-fetch into /usr/local/bin/
+ - curl -s https://raw.githubusercontent.com/envkey/envkey-source/master/install.sh | bash
+ - curl -s https://raw.githubusercontent.com/envkey/envkey-fetch/master/install.sh | bash
+
+ # blast the envkey variable values into /etc/environment and into the runcmd shell
+ # note 1: the result from get-parameter will have quotes around it, so use cut to unquote it
+ # note 2: envkey-source returns values in a format that cannot be used with /etc/environment,
+ #         so we use envkey-fetch and generate that one ourselves.
+ - if [ "${envkey_ssm_parameter_name}" ]; then
+       export ENVKEY=$(aws ssm get-parameter --region ${region} --name ${envkey_ssm_parameter_name} --with-decryption --query 'Parameter.Value' | cut -d\" -f2) &&
+       echo "ENVKEY=$${ENVKEY}" >> /etc/environment &&
+       /usr/local/bin/envkey-fetch $${ENVKEY} | python -c 'import json, sys; print "\n".join([(k+"="+v) for k,v in sorted(json.load(sys.stdin).items())])' >> /etc/environment &&
+       /usr/local/bin/envkey-source $${ENVKEY} > /tmp/envkey-exports &&
+       source /tmp/envkey-exports &&
+       rm -f /tmp/envkey-exports
+   ; fi
+
+ # at this point we have all the envkey variables set in /etc/environment AND in the runcmd shell
+
+ # backup substitute for envkey - just read a file from s3
+ - if false; then
+       aws s3 cp "${envkey_secrets_s3_uri}" /tmp/envkey.env &&
+       cat /tmp/envkey.env >> /etc/environment &&
+       export $(cat /tmp/envkey.env) &&
+       rm -f /tmp/envkey.env
+   ; fi
+
+ # ensure that all required environment variables are actually present
+ - if [[ -z "$${SITENAME}" || -z "$${SITEDOMAIN}" || -z "$${GITHUB_DEPLOY_TOKEN}" || -z "$${PUPPET_BRANCH}" || -z "$${PUPPET_REPO}" ]]; then
+       echo "aws-cloud-init - not all required environment variables are present! Setup will probably fail!"
+   ; else
+       echo "aws-cloud-init - all required environment variables seem to be present."
+   ; fi
+
+ # set up Facter, hard-coding the Terraform variables in plaintext
+ - mkdir -p /etc/facter/facts.d
+ - rm -f /etc/facter/facts.d/terraform.txt && touch /etc/facter/facts.d/terraform.txt && chmod 0600 /etc/facter/facts.d/terraform.txt
+ - echo "enable_backups=${enable_backups}" >> /etc/facter/facts.d/terraform.txt
+
+ # also emit all /etc/environment variables as Facter facts
+ # NOTE: the key names will be converted to lowercase by Facter!
+ - rm -f /etc/facter/facts.d/envkey.txt && touch /etc/facter/facts.d/envkey.txt && chmod 0600 /etc/facter/facts.d/envkey.txt
+ - cat /etc/environment >> /etc/facter/facts.d/envkey.txt
+ 
+ # download Puppet modules from GitHub
+ - mkdir -p /etc/puppet/modules
+ - git clone https://$${GITHUB_DEPLOY_TOKEN}@$${PUPPET_REPO} /etc/puppet/modules --branch $${PUPPET_BRANCH}
+ - chmod +x /etc/puppet/modules/*/facts.d/*
+ - echo "include spin_ec2" > /etc/puppet/main.pp
+ - chown -R root:root /etc/puppet
+
+ # (more instance-specific commands will go here)
+
+ # then cloud-config-tail.yaml will go here
+
+# reboot after everything is finished, to use patched kernel
+power_state:
+ mode: reboot
+ message: Rebooting to complete cloud-init setup
