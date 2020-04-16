@@ -34,8 +34,8 @@ locals {
 resource "aws_ssm_parameter" "envkey" {
   name = "/${local.keyname}/envkey" # note: duplicated below to avoid triggering dependency creation
   type = "SecureString"
-  value = "${var.envkey}"
-#  key_id = "${var.envkey_encryption_key_id}"
+  value = var.envkey
+#  key_id = var.envkey_encryption_key_id
   overwrite = true
 #  tags = {
 #    Terraform = "true"
@@ -44,16 +44,16 @@ resource "aws_ssm_parameter" "envkey" {
 
 # Backup to EnvKey - store the same env vars in a file in S3
 resource "aws_s3_bucket_object" "envkey_env" {
-  count = "${var.secrets_bucket != "" ? 1 : 0}"
-  bucket = "${var.secrets_bucket}"
+  count = var.secrets_bucket != "" ? 1 : 0
+  bucket = var.secrets_bucket
   key = "${local.keyname}-envkey.env"
   source = "envkey.env"
-  etag = "${md5(file(var.envkey_sub != "" ? "${var.envkey_sub}-envkey.env" : "envkey.env"))}"
+  etag = md5(file(var.envkey_sub != "" ? "${var.envkey_sub}-envkey.env" : "envkey.env"))
 }
 
 # cloud-init boilerplate for all EC2 instances
 data "template_file" "cloud_config" {
-  template = "${file("${path.module}/cloud-config.yaml")}"
+  template = file("${path.module}/cloud-config.yaml")
   vars = {
     terraform_cron_mail_sns_topic = "${var.cron_mail_sns_topic}"
     region = "${var.region}"
